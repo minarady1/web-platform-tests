@@ -282,7 +282,7 @@ def get_git_cmd(repo_path):
     def git(cmd, *args):
         full_cmd = ["git", cmd] + list(args)
         try:
-            return subprocess.check_output(full_cmd, cwd=repo_path, stderr=subprocess.STDOUT)
+            return subprocess.check_output(full_cmd, cwd=repo_path, stderr=subprocess.STDOUT).strip()
         except subprocess.CalledProcessError as e:
             logger.error("Git command exited with status %i" % e.returncode)
             logger.error(e.output)
@@ -348,14 +348,14 @@ class pwd(object):
         self.old_dir = None
 
 
-def fetch_wpt_master():
+def fetch_wpt(*args):
     git = get_git_cmd(os.path.join(os.path.abspath(os.curdir), "w3c", "web-platform-tests"))
-    git("fetch", "https://github.com/w3c/web-platform-tests.git", "master:master")
+    git("fetch", "https://github.com/w3c/web-platform-tests.git", *args)
 
 
 def get_sha1():
     git = get_git_cmd(os.path.join(os.path.abspath(os.curdir), "w3c", "web-platform-tests"))
-    return git("rev-parse", "HEAD").strip()
+    return git("rev-parse", "HEAD")
 
 
 def build_manifest():
@@ -371,11 +371,35 @@ def install_wptrunner():
     call("pip", "install", os.path.join("w3c", "wptrunner"))
 
 
-def get_files_changed():
+def get_branch_point():
+    git = get_git_cmd(os.path.join(os.path.abspath(os.curdir), "w3c", "web-platform-tests"))
+    if os.environ.get("TRAVIS_PULL_REQUEST", "false") != "false":
+        # This is a PR, so the base branch is in TRAVIS_BRANCH
+        branch_point = os.environ.get("TRAVIS_COMMIT_RANGE").split(".", 1)[0]
+        branch_point = git("rev-parse", branch_point)
+    else:
+        # Otherwise we aren't on a PR, so we try to find commits that are only in the
+        # current branch c.f.
+        # http://stackoverflow.com/questions/13460152/find-first-ancestor-commit-in-another-branch
+        head = git("rev-parse", "HEAD")
+        # To do this we need all the commits in the local copy
+        fetch_wpt("--unshallow")
+        logger.info(git("branch", "-a"))
+        logger.info("HEAD: %s" % head)
+        not_heads = [item for item in git("rev-parse", "--not", "--all").split("\n")
+                     if not head in item]
+        logger.info("not heads: %r" % not_heads)
+        commits = git("rev-list", *not_heads).split("\n")
+        logger.info("commits: %r" % commits)
+        first_commit = commits[-1]
+        logger.info("first_commit: %s" % first_commit)
+        branch_point = git("rev-parse", first_commit + "^")
+    logger.debug("Branch point from master: %s" % branch_point)
+    return branch_point
+
+def get_files_changed(branch_point):
     root = os.path.abspath(os.curdir)
     git = get_git_cmd("%s/w3c/web-platform-tests" % root)
-    branch_point = git("merge-base", "HEAD", "master").strip()
-    logger.debug("Branch point from master: %s" % branch_point)
     logger.debug(git("log", "--oneline", "%s.." % branch_point))
     files = git("diff", "--name-only", "-z", "%s.." % branch_point)
     if not files:
@@ -620,14 +644,16 @@ def main():
             logger.critical("Unrecognised browser %s" % browser_name)
             return 1
 
-        fetch_wpt_master()
+        fetch_wpt("master:master")
 
         head_sha1 = get_sha1()
         logger.info("Testing revision %s" % head_sha1)
 
+        branch_point = get_branch_point()
+
         # For now just pass the whole list of changed files to wptrunner and
         # assume that it will run everything that's actually a test
-        files_changed = get_files_changed()
+        files_changed = get_files_changed(branch_point)
 
         if not files_changed:
             logger.info("No files changed")
